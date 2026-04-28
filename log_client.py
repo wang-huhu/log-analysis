@@ -73,20 +73,32 @@ def _build_payload(start_time: str, end_time: str) -> dict:
                     "fragment_size": 2147483647,
                 },
             },
+            "rest_total_hits_as_int": True,
+            "ignore_unavailable": True,
+            "ignore_throttled": True,
+            "timeout": "30000ms",
         },
-        "rest_total_hits_as_int": True,
-        "ignore_unavailable": True,
-        "ignore_throttled": True,
-        "timeout": "30000ms",
+        "serverStrategy": "es",
     }
 
 
+def _truncate_response_text(text: str, limit: int = 200) -> str:
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}..."
+
+
 def fetch_logs(config: AppConfig, start_time: str, end_time: str) -> dict:
+    payload = _build_payload(start_time, end_time)
+    server_strategy = payload.get("params", {}).get("body", {}).get("serverStrategy")
+    print(f"[调试] 请求 URL: {config.log_api_url}")
+    print(f"[调试] payload: {json.dumps(payload, ensure_ascii=False)}")
+    print(f"[调试] serverStrategy: {'存在' if server_strategy is not None else 'None'}，值: {server_strategy}")
     try:
         response = requests.post(
             config.log_api_url,
             headers=_DEFAULT_HEADERS,
-            data=json.dumps(_build_payload(start_time, end_time)),
+            data=json.dumps(payload),
             timeout=30,
         )
     except requests.Timeout as exc:
@@ -95,6 +107,11 @@ def fetch_logs(config: AppConfig, start_time: str, end_time: str) -> dict:
         raise RuntimeError("日志接口请求失败") from exc
 
     if response.status_code != 200:
-        raise RuntimeError(f"日志接口返回异常状态码: {response.status_code}")
+        response_text = _truncate_response_text(response.text or "")
+        raise RuntimeError(f"日志接口返回异常状态码: {response.status_code}, response: {response_text}")
 
-    return response.json()
+    response_json = response.json()
+    top_level_keys = list(response_json.keys()) if isinstance(response_json, dict) else []
+    print(f"[调试] 响应状态码: {response.status_code}")
+    print(f"[调试] 响应顶层 keys: {top_level_keys}")
+    return response_json

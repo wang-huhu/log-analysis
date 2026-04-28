@@ -8,7 +8,7 @@ from typing import Any
 from models import LogEvent, compute_top_business_frames
 
 # 正则表达式：匹配异常类型（如 java.lang.NullPointerException）
-_EXCEPTION_TYPE_RE = re.compile(r"^([A-Za-z_][\w$]*\.)+[A-Za-z_][\w$]*(?:Exception|Error)\b")
+_EXCEPTION_TYPE_RE = re.compile(r"^([A-Za-z_][\w$]*\.)+[A-Za-z_][\w$]*(?:Exception|Error|Failure)\b")
 # 正则表达式：匹配 "Caused by:" 行，提取异常类型和消息
 _CAUSED_BY_RE = re.compile(r"^Caused by:\s*([^:]+)(?::\s*(.*))?$")
 # 正则表达式：匹配栈帧行（以 "at " 开头）
@@ -83,6 +83,7 @@ def parse_raw_response(payload: dict[str, Any], package_prefixes: list[str] | No
             stack_frames = extract_stack_frames(event_log)  # 提取所有栈帧
             business_frames = extract_business_frames(stack_frames, prefixes)  # 过滤业务栈帧
             first_business = business_frames[0] if business_frames else None  # 第一个业务栈帧
+            fallback_frame = extract_fallback_frame(stack_frames, business_frames)  # 退化栈帧
             top_business_frames = compute_top_business_frames(business_frames)  # 前N个关键业务栈帧
 
             # 构建结构化日志事件对象
@@ -99,6 +100,7 @@ def parse_raw_response(payload: dict[str, Any], package_prefixes: list[str] | No
                     top_stack_lines=stack_frames,  # 完整栈帧列表
                     business_stack_frames=business_frames,  # 业务栈帧列表
                     first_business_frame=first_business,  # 首个业务栈帧
+                    fallback_frame=fallback_frame,  # 退化栈帧
                     top_business_frames=top_business_frames,  # 关键业务栈帧
                 )
             )
@@ -119,22 +121,38 @@ def extract_exception_type(logmessage: str) -> str | None:
     if not logmessage:
         return None
 
-    first_line = _strip_log_prefix(logmessage.splitlines()[0].strip())
+    lines = [_strip_log_prefix(line.strip()) for line in logmessage.splitlines() if line.strip()]
+    if not lines:
+        return None
+
+    first_line = lines[0]
     m = _EXCEPTION_TYPE_RE.match(first_line)
     if m:
         return m.group(0)
 
-    # 回退：从 "Caused by:" 行提取异常类型
-    for line in logmessage.splitlines():
-        stripped = _strip_log_prefix(line.strip())
-        m = _CAUSED_BY_RE.match(stripped)
+    # 回退1：从下方第一条“异常声明行”提取异常类型。
+    for line in lines[1:]:
+        m = _EXCEPTION_TYPE_RE.match(line)
+        if m:
+            return m.group(0)
+
+    # 回退2：从 "Caused by:" 行提取异常类型
+    for line in lines:
+        m = _CAUSED_BY_RE.match(line)
         if m:
             exc = (m.group(1) or "").strip()
             return exc or None
 
-    # 再次回退：从文本中查找类全限定名
+    # 回退3：从文本中查找类全限定名
     exception_from_line = _extract_exception_type_from_text(first_line)
-    return exception_from_line
+    if exception_from_line:
+        return exception_from_line
+
+    for line in lines[1:]:
+        exception_from_line = _extract_exception_type_from_text(line)
+        if exception_from_line:
+            return exception_from_line
+    return None
 
 
 def extract_root_cause(logmessage: str) -> str | None:
@@ -152,11 +170,14 @@ def extract_root_cause(logmessage: str) -> str | None:
     if not logmessage:
         return None
 
+    lines = [_strip_log_prefix(line.strip()) for line in logmessage.splitlines() if line.strip()]
+    if not lines:
+        return None
+
     # 遍历所有行，保留最后一个 "Caused by:" 的消息（最内层根因）
     root_cause_message: str | None = None
-    for line in logmessage.splitlines():
-        stripped = _strip_log_prefix(line.strip())
-        m = _CAUSED_BY_RE.match(stripped)
+    for line in lines:
+        m = _CAUSED_BY_RE.match(line)
         if m:
             msg = (m.group(2) or "").strip()
             if msg:
@@ -165,8 +186,15 @@ def extract_root_cause(logmessage: str) -> str | None:
     if root_cause_message:
         return root_cause_message
 
-    # 回退：从第一行冒号后提取消息
-    first_line = _strip_log_prefix(logmessage.splitlines()[0].strip())
+    # 回退：优先找第一条异常声明行中的消息，兼容首行只是包装描述的场景。
+    for line in lines:
+        if _EXCEPTION_TYPE_RE.match(line) and ":" in line:
+            msg = line.split(":", 1)[1].strip()
+            if msg:
+                return msg
+
+    # 最后回退：从第一行冒号后提取消息
+    first_line = lines[0]
     if ":" in first_line:
         msg = first_line.split(":", 1)[1].strip()
         return msg or None
@@ -216,6 +244,19 @@ def extract_business_frames(stack_frames: list[str], package_prefixes: list[str]
 
     prefixes = tuple(package_prefixes)
     return [f for f in stack_frames if f.startswith(prefixes)]
+
+
+
+def extract_fallback_frame(stack_frames: list[str], business_frames: list[str]) -> str | None:
+    """当业务栈帧缺失时，提取首条可用于指纹的退化栈帧。"""
+    if business_frames or not stack_frames:
+        return None
+
+    for frame in stack_frames:
+        if _is_jdk_frame(frame):
+            continue
+        return frame
+    return None
 
 
 def _split_error_events(raw_log: str) -> list[str]:
@@ -462,10 +503,16 @@ def _extract_exception_type_from_text(text: str) -> str | None:
     Returns:
         异常类型字符串，未找到返回 None
     """
-    for candidate in re.findall(r"([A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*)+(?:Exception|Error))", text):
+    for candidate in re.findall(r"([A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*)+(?:Exception|Error|Failure))", text):
         if candidate.startswith(("org.", "com.", "java.", "javax.", "jakarta.", "kotlin.")):
             return candidate
     return None
+
+
+
+def _is_jdk_frame(frame: str) -> bool:
+    """判断是否为 JDK/标准库栈帧。"""
+    return frame.startswith(("java.", "java/", "javax.", "jakarta.", "jdk.", "sun.", "com.sun."))
 
 
 def _extract_primary_message(logmessage: str) -> str | None:

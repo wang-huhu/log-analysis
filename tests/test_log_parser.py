@@ -1,6 +1,7 @@
 import pytest
 
 
+
 def test_parse_raw_response_extracts_multiple_events():
     from log_parser import parse_raw_response
 
@@ -42,6 +43,7 @@ def test_parse_raw_response_extracts_multiple_events():
     assert events[0].raw_log.startswith("java.lang.IllegalStateException")
     assert events[1].timestamp == "2026-04-25T10:00:01.000Z"
     assert events[1].pod_name == "p2"
+
 
 
 def test_parse_raw_response_splits_multiple_error_blocks_in_one_hit():
@@ -108,6 +110,14 @@ def test_parse_raw_response_splits_multiple_error_blocks_in_one_hit():
             "kotlin.KotlinNullPointerException",
         ),
         (
+            "not an exception line\njava.lang.IllegalStateException: boom\n\tat x.y.Z.m(Z.kt:1)",
+            "java.lang.IllegalStateException",
+        ),
+        (
+            "not an exception line\norg.hibernate.AssertionFailure: value involves formulas\n\tat org.hibernate.persister.entity.AbstractEntityPersister.getTableUpdateNeeded(AbstractEntityPersister.java:3697)",
+            "org.hibernate.AssertionFailure",
+        ),
+        (
             "not an exception line\n\tat x.y.Z.m(Z.kt:1)",
             None,
         ),
@@ -117,6 +127,7 @@ def test_extract_exception_type(logmessage, expected):
     from log_parser import extract_exception_type
 
     assert extract_exception_type(logmessage) == expected
+
 
 
 def test_extract_root_cause_message_prefers_caused_by_line():
@@ -129,6 +140,7 @@ def test_extract_root_cause_message_prefers_caused_by_line():
         "\tat org.lumo.avatar.AvatarService.save(AvatarService.kt:12)\n"
     )
     assert extract_root_cause(logmessage) == "bad input"
+
 
 
 def test_extract_business_frames_and_first_business_frame():
@@ -151,3 +163,45 @@ def test_extract_business_frames_and_first_business_frame():
         "org.lumo.controller.MeProfileController.upload(MeProfileController.kt:87)",
     ]
     assert business[0] == "org.lumo.avatar.AvatarService.save(AvatarService.kt:12)"
+
+
+
+def test_parse_raw_response_extracts_fallback_frame_when_business_frame_missing():
+    from fingerprinter import build_fingerprint
+    from log_parser import parse_raw_response
+
+    payload = {
+        "rawResponse": {
+            "hits": {
+                "hits": [
+                    {
+                        "_source": {
+                            "@timestamp": "2026-04-25T10:10:00.000Z",
+                            "logmessage": (
+                                "Servlet.service() for servlet [dispatcherServlet] threw exception\n"
+                                "org.hibernate.AssertionFailure: value involves formulas\n"
+                                "\tat org.hibernate.persister.entity.AbstractEntityPersister.getTableUpdateNeeded(AbstractEntityPersister.java:3697)\n"
+                                "\tat org.springframework.orm.jpa.SharedEntityManagerCreator$SharedEntityManagerInvocationHandler.invoke(SharedEntityManagerCreator.java:1)\n"
+                                "\tat java.base/java.lang.Thread.run(Thread.java:840)\n"
+                            ),
+                        }
+                    }
+                ]
+            }
+        }
+    }
+
+    events = parse_raw_response(payload, package_prefixes=["org.lumo."])
+
+    assert len(events) == 1
+    assert events[0].exception_type == "org.hibernate.AssertionFailure"
+    assert events[0].business_stack_frames == []
+    assert (
+        events[0].fallback_frame
+        == "org.hibernate.persister.entity.AbstractEntityPersister.getTableUpdateNeeded(AbstractEntityPersister.java:3697)"
+    )
+    assert (
+        build_fingerprint(events[0])
+        == "org.hibernate.AssertionFailure|value involves formulas|org.hibernate.persister.entity.AbstractEntityPersister.getTableUpdateNeeded(AbstractEntityPersister.java:3697)"
+    )
+

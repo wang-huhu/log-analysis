@@ -28,7 +28,7 @@ def build_fingerprint(event: LogEvent) -> str:
     """
     exc = _norm(event.exception_type) or "<none>"  # 异常类型，缺失时用 <none> 占位
     cause = _norm(event.root_cause_message) or "<none>"  # 根因消息
-    frame = _norm(event.first_business_frame) or "<none>"  # 首个业务栈帧
+    frame = _norm(event.first_business_frame) or _norm(getattr(event, "fallback_frame", None)) or "<none>"
     return f"{exc}|{cause}|{frame}"
 
 

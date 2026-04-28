@@ -11,6 +11,7 @@ class DummyConfig:
     feishu_webhook_url: str = "https://example.invalid/webhook"
 
 
+
 def _mk_group(fingerprint: str) -> ErrorGroup:
     ev = LogEvent(
         timestamp="2026-01-01T00:00:00Z",
@@ -24,6 +25,7 @@ def _mk_group(fingerprint: str) -> ErrorGroup:
         top_stack_lines=["a", "b", "c"],
         business_stack_frames=["org.lumo.Foo.bar(Foo.kt:1)"],
         first_business_frame="org.lumo.Foo.bar(Foo.kt:1)",
+        fallback_frame=None,
         top_business_frames=["org.lumo.Foo.bar(Foo.kt:1)"],
     )
     return ErrorGroup(
@@ -34,6 +36,7 @@ def _mk_group(fingerprint: str) -> ErrorGroup:
         sample_event=ev,
         all_related_events=[ev],
     )
+
 
 
 def _mk_analysis() -> AnalysisResult:
@@ -48,6 +51,7 @@ def _mk_analysis() -> AnalysisResult:
     )
 
 
+
 def test_render_message_titles_differ_by_fingerprint():
     a = render_message(_mk_group("fp-a"), _mk_analysis())
     b = render_message(_mk_group("fp-b"), _mk_analysis())
@@ -55,6 +59,7 @@ def test_render_message_titles_differ_by_fingerprint():
     assert a["msg_type"] == "text"
     assert "content" in a and "text" in a["content"]
     assert a["content"]["text"].splitlines()[0] != b["content"]["text"].splitlines()[0]
+
 
 
 def test_send_message_posts_expected_payload(monkeypatch):
@@ -83,6 +88,7 @@ def test_send_message_posts_expected_payload(monkeypatch):
     assert seen["url"] == cfg.feishu_webhook_url
     assert seen["json"] == msg
     assert seen["timeout"] == 10
+
 
 
 def test_send_message_raises_on_http_error(monkeypatch):

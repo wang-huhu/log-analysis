@@ -107,8 +107,12 @@ def run_once(config: AppConfig) -> list[dict]:
     start_time, end_time = _build_time_window(now, getattr(config, "query_window_minutes", 1))
 
     payload = log_client.fetch_logs(config, start_time=start_time, end_time=end_time)
+    hits = payload.get("rawResponse", {}).get("hits", {}).get("hits", [])
+    print(f"[调试] 拉到 hits 数量: {len(hits)}")
     events = log_parser.parse_raw_response(payload, package_prefixes=getattr(config, "business_package_prefixes", []))
+    print(f"[调试] parse 后 events 数量: {len(events)}")
     groups = fingerprinter.group_events(events)
+    print(f"[调试] group 后 groups 数量: {len(groups)}")
 
     state_path = getattr(config, "state_file_path", state_store.DEFAULT_STATE_PATH)
     _ = state_store.load_state(state_path)
@@ -118,11 +122,14 @@ def run_once(config: AppConfig) -> list[dict]:
     for group in groups:
         fp = getattr(group, "fingerprint", "") or ""
         # 冷却窗口：同指纹在 cooldown_minutes 内不重复通知
+        should_send = True
         try:
-            if not state_store.should_send(fp, now, getattr(config, "cooldown_minutes", 0), path=state_path):
-                continue
+            should_send = state_store.should_send(fp, now, getattr(config, "cooldown_minutes", 0), path=state_path)
         except Exception:
-            pass
+            should_send = True
+        print(f"[调试] group fingerprint: {fp}，是否进入 should_send: {'是' if should_send else '否'}")
+        if not should_send:
+            continue
 
         try:
             # 确保 top_business_frames 存在（用于定位与多 frame snippet 提取）
@@ -137,16 +144,24 @@ def run_once(config: AppConfig) -> list[dict]:
             # 模型调用失败不阻塞整体（该错误组跳过通知）
             analysis_result = None
             try:
+                print("开始分析")
                 analysis_result = analyzer.analyze(prompt, config)
-            except Exception:
+                print("分析成功")
+            except Exception as exc:
+                print("分析失败")
+                print(f"异常: {exc}")
                 analysis_result = None
 
             if analysis_result is not None:
                 message = feishu_notifier.render_message(group_to_process, analysis_result)
+                print("消息已生成")
                 try:
+                    print("开始发送")
                     feishu_notifier.send_message(config, message)
-                except Exception:
-                    pass
+                    print("发送成功")
+                except Exception as exc:
+                    print("发送失败")
+                    print(f"异常: {exc}")
                 messages.append(message)
 
         except Exception:

@@ -80,6 +80,8 @@ class LogEvent:
     business_stack_frames: list[str]
     # 第一条业务栈帧（用于指纹生成）
     first_business_frame: str | None
+    # 当没有业务栈帧时，退化使用的首条可用框架栈帧
+    fallback_frame: str | None
     # 按顺序取前 N 条业务栈帧（用于源码定位）
     top_business_frames: list[str]
 

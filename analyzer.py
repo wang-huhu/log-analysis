@@ -1,15 +1,65 @@
 import json
+import re
 from typing import Any, Callable
 
 from models import AppConfig, AnalysisResult
 
 
+_FENCED_JSON_PATTERN = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL)
+
+
+def _try_load_json(text: str) -> Any:
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return None
+
+
+def _extract_fenced_content(text: str) -> str | None:
+    stripped = text.strip()
+    match = _FENCED_JSON_PATTERN.match(stripped)
+    if not match:
+        return None
+    return match.group(1).strip()
+
+
+def _extract_first_json_object(text: str) -> str | None:
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or start >= end:
+        return None
+    return text[start : end + 1]
+
+
+def _load_analysis_payload(text: str) -> Any:
+    payload = _try_load_json(text)
+    if payload is not None:
+        return payload
+
+    fenced_content = _extract_fenced_content(text)
+    if fenced_content is not None:
+        payload = _try_load_json(fenced_content)
+        if payload is not None:
+            return payload
+
+    extracted_object = _extract_first_json_object(text)
+    if extracted_object is not None:
+        payload = _try_load_json(extracted_object)
+        if payload is not None:
+            return payload
+
+    raise ValueError("模型返回不是合法 JSON")
+
+
 def _parse_analysis_json(text: str) -> AnalysisResult:
     # 将模型输出解析为结构化 AnalysisResult，并对 schema 做严格校验
+    preview = text[:1000]
+    suffix = "...（已截断）" if len(text) > 1000 else ""
+    print(f"模型原始返回内容（前 1000 字符）：\n{preview}{suffix}")
     try:
-        payload = json.loads(text)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"模型返回不是合法 JSON: {e.msg} (pos={e.pos})") from e
+        payload = _load_analysis_payload(text)
+    except ValueError as e:
+        raise ValueError(str(e)) from e
 
     if not isinstance(payload, dict):
         raise ValueError("模型返回 JSON 必须是 object")
